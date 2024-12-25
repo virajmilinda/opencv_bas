@@ -1,0 +1,75 @@
+import cv2
+import numpy as np
+import time
+import csv
+
+# Define function for preprocessing image
+def preprocess_image(img, thresh_1=50, thresh_2=150):
+    img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    img_blur = cv2.GaussianBlur(img_gray, (5, 5), 1)
+    img_canny = cv2.Canny(img_blur, thresh_1, thresh_2)
+    return img_canny
+
+# Define function to find contours and measure dimensions
+def measure_objects(img, min_contour_area=500):
+    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    dimensions = []
+    for contour in contours:
+        if cv2.contourArea(contour) > min_contour_area:
+            x, y, w, h = cv2.boundingRect(contour)
+            dimensions.append((x, y, w, h))
+    return dimensions
+
+# Define function to annotate dimensions on frame
+def annotate_frame(frame, dimensions):
+    for (x, y, w, h) in dimensions:
+        cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+        cv2.putText(frame, f'W:{w} H:{h}', (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+# Define function to save dimensions to a file
+def save_dimensions_to_file(dimensions, filename='measurements.csv'):
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    with open(filename, mode='a', newline='') as file:
+        writer = csv.writer(file)
+        for (x, y, w, h) in dimensions:
+            writer.writerow([timestamp, x, y, w, h])
+
+# Capture video feed from webcam
+vid_capture = cv2.VideoCapture(1)
+
+# Create CSV file and write header
+with open('measurements.csv', mode='w', newline='') as file:
+    writer = csv.writer(file)
+    writer.writerow(['Timestamp', 'X', 'Y', 'Width', 'Height'])
+
+last_saved_time = time.time()
+
+if not vid_capture.isOpened():
+    print("Error opening video feed")
+else:
+    while vid_capture.isOpened():
+        ret, frame = vid_capture.read()
+        if not ret:
+            break
+        
+        preprocessed = preprocess_image(frame)
+        dimensions = measure_objects(preprocessed)
+        annotated_frame = frame.copy()
+        annotate_frame(annotated_frame, dimensions)
+        
+        # Concatenate original and annotated frames side by side
+        side_by_side = np.concatenate((frame, annotated_frame), axis=1)
+        
+        cv2.imshow('Original and Processed Video Feed', side_by_side)
+        
+        current_time = time.time()
+        if current_time - last_saved_time >= 1:
+            save_dimensions_to_file(dimensions)
+            last_saved_time = current_time
+        
+        key = cv2.waitKey(1)
+        if key == ord('q'):
+            break
+
+vid_capture.release()
+cv2.destroyAllWindows()
