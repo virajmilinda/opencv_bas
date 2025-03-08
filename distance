@@ -1,0 +1,26 @@
+const int trigPin = 8;
+const int echoPin = 9;
+
+float duration, distance;
+
+void setup() {
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  Serial.begin(9600);
+}
+
+void loop() {
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  duration = pulseIn(echoPin, HIGH);
+  distance = (duration * 0.0343) / 2;
+  Serial.print("Vertical Distance: ");
+  Serial.print(distance);
+  Serial.println(" mm");
+
+  delay(33);  // Adjust delay to match the frame rate (30fps)
+}
