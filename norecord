@@ -1,0 +1,171 @@
+import cv2
+import numpy as np
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image, ImageTk
+import serial
+import time
+
+O1_WIDTH_MM = 40
+O1_HEIGHT_MM = 32
+O2_WIDTH_MM = 28
+O2_HEIGHT_MM = 30
+
+distance = "No Input"
+
+def update_serial_data():
+    global ser, distance
+    try:
+        if ser.in_waiting > 0:
+            line = ser.readline().decode('utf-8').rstrip()
+            if "Distance:" in line:
+                distance = line.split(" ")[1]  # Adjust this to correctly parse your distance value
+                # print(f"Parsed Distance: {distance}")  # Print the parsed distance value for debugging
+    except NameError:
+        distance = "No Input"
+    root.after(100, update_serial_data)
+
+# Set up the serial connection (adjust 'COM3' and baud rate if necessary)
+ser = serial.Serial('COM3', 9600, timeout=1)
+time.sleep(2)  # Wait for the connection to initialize
+
+def preprocess_image(img):
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    adaptive_thresh = cv2.adaptiveThreshold(l, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                            cv2.THRESH_BINARY, 11, 2)
+    adaptive_thresh = cv2.bitwise_not(adaptive_thresh)
+    return adaptive_thresh
+
+def measure_objects_with_polygons(img, min_contour_area=500):
+    contours, _ = cv2.findContours(img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    dimensions_polygons = []
+    for contour in contours:
+        if cv2.contourArea(contour) > min_contour_area:
+            epsilon = 0.01 * cv2.arcLength(contour, True)
+            polygon = cv2.approxPolyDP(contour, epsilon, True)
+            x, y, w, h = cv2.boundingRect(polygon)
+            dimensions_polygons.append((polygon, x, y, w, h))
+    dimensions_polygons.sort(key=lambda x: x[1] + x[3], reverse=True)
+    return dimensions_polygons[:2]
+
+def annotate_frame_with_polygons(frame, dimensions_polygons):
+    global distance
+    labels = ['ref_O', 'targ_O']
+    frame_height, frame_width = frame.shape[:2]
+    measurement_texts = ['ref_O_1: N/A', 'ref_O_2: N/A', 'targ_O_1: N/A', 'targ_O_2: N/A']
+    o1_ratio = "N/A"  # Default value for O1 ratio
+    for i, (polygon, x, y, w, h) in enumerate(dimensions_polygons):
+        label = labels[i] if i < len(labels) else 'No targ_O detected'
+        rect = cv2.minAreaRect(polygon)
+        box = cv2.boxPoints(rect)
+        box = np.int32(box)
+        cx, cy = np.mean(box[:, 0]), np.mean(box[:, 1])
+        cv2.polylines(frame, [box], True, (0, 255, 0), 2)
+        label_x = int(cx) + 10 if cx + 10 < frame_width else int(cx) - 10
+        label_y = int(cy) - 10 if cy - 10 > 0 else int(cy) + 20
+        cv2.putText(frame, label, (label_x, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        midpoints = [(int((box[i][0] + box[(i+1) % 4][0]) / 2), int((box[i][1] + box[(i+1) % 4][1]) / 2)) for i in range(4)]
+        cv2.line(frame, midpoints[0], midpoints[2], (0, 255, 0), 1)
+        cv2.line(frame, midpoints[1], midpoints[3], (0, 255, 0), 1)
+        leg1_length_px = np.sqrt((midpoints[2][0] - midpoints[0][0])**2 + (midpoints[2][1] - midpoints[0][1])**2)
+        leg2_length_px = np.sqrt((midpoints[3][0] - midpoints[1][0])**2 + (midpoints[3][1] - midpoints[1][1])**2)
+        if rect[1][0] == 0 or rect[1][1] == 0:
+            leg1_length_mm = leg2_length_mm = 0
+        else:
+            if i == 0:
+                leg1_length_mm = round(leg1_length_px * (O1_WIDTH_MM / rect[1][0]), 2)
+                leg2_length_mm = round(leg2_length_px * (O1_HEIGHT_MM / rect[1][1]), 2)
+                o1_ratio = round(leg1_length_mm / leg2_length_mm, 2) if leg2_length_mm != 0 else "N/A"
+            else:
+                leg1_length_mm = round(leg1_length_px * (O1_WIDTH_MM / dimensions_polygons[0][3]), 2)
+                leg2_length_mm = round(leg2_length_px * (O1_HEIGHT_MM / dimensions_polygons[0][4]), 2)
+        measurement_texts[i * 2] = f'{label}_1: {leg1_length_px:.2f}px ({leg1_length_mm}mm)'
+        measurement_texts[i * 2 + 1] = f'{label}_2: {leg2_length_px:.2f}px ({leg2_length_mm}mm)'
+    measurement_texts.append(f'O1 Ratio: {o1_ratio}')
+    measurement_texts.append(f'Distance: {distance} mm')
+    return measurement_texts
+
+def update_frame():
+    global vid_capture, canvas, stop_video, measurements_textbox
+    if stop_video:
+        vid_capture.release()
+        canvas.delete("all")
+        measurements_textbox.delete('1.0', tk.END)
+        measurements_textbox.insert(tk.END, "ref_O_1: N/A\nref_O_2: N/A\n\n"
+                                            "targ_O_1: N/A\nTarg_O_2: N/A\n\n"
+                                            "O1 Ratio: N/A\n\n"
+                                            "Distance: N/A cm")
+        return
+    ret, frame = vid_capture.read()
+    if not ret:
+        return
+    frame_height, frame_width = frame.shape[:2]
+    preprocessed = preprocess_image(frame)
+    dimensions_polygons = measure_objects_with_polygons(preprocessed)
+    annotated_frame = frame.copy()
+    measurement_texts = annotate_frame_with_polygons(annotated_frame, dimensions_polygons)
+    small_frame = cv2.resize(frame, (200, 150))
+    bordered_frame = cv2.copyMakeBorder(small_frame, 2, 2, 2, 2, cv2.BORDER_CONSTANT, value=(255, 0, 0))
+    height, width, _ = bordered_frame.shape
+    annotated_frame[0:height, 0:width] = bordered_frame
+    frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+    img = Image.fromarray(frame_rgb)
+    imgtk = ImageTk.PhotoImage(image=img)
+    canvas.create_image(0, 0, anchor=tk.NW, image=imgtk)
+    canvas.imgtk = imgtk
+    measurements_textbox.delete('1.0', tk.END)
+
+    # Separate measurement texts into sections
+    section_1 = "Object 1 Related Values:\n"
+    section_2 = "Object 2 Related Values:\n"
+    section_3 = "Serial Input Values:\n"
+    for i, text in enumerate(measurement_texts):
+        if i < 2:
+            section_1 += f"{text}\n"
+        elif i < 4:
+            section_2 += f"{text}\n"
+        else:
+            section_3 += f"{text}\n"
+
+    measurements_text = (section_1 + "\n-----------------------------\n" + 
+                         section_2 + "\n-----------------------------\n" + 
+                         section_3 + "\n-----------------------------")
+    measurements_textbox.insert(tk.END, measurements_text)
+    root.after(10, update_frame)
+
+def start_video_feed():
+    global vid_capture, stop_video, measurements_textbox
+    measurements_textbox.delete('1.0', tk.END)  # Clear the text box when the video feed starts
+    vid_capture = cv2.VideoCapture(1)
+    if not vid_capture.isOpened():
+        messagebox.showerror("Error", "Error opening video feed")
+        return
+    stop_video = False
+    update_frame()
+
+def stop_video_feed():
+    global stop_video, measurements_textbox
+    stop_video = True
+    measurements_textbox.delete('1.0', tk.END)  # Clear the text box when the video feed stops
+    measurements_textbox.insert(tk.END, "")  # Insert empty text to ensure it's cleared
+
+root = tk.Tk()
+buttons_frame = tk.Frame(root)
+buttons_frame.pack(pady=10)
+
+start_button = tk.Button(buttons_frame, text="Start Video Feed", command=start_video_feed)
+start_button.pack(side=tk.LEFT, padx=5)
+
+stop_button = tk.Button(buttons_frame, text="Stop Video Feed", command=stop_video_feed)
+stop_button.pack(side=tk.LEFT, padx=5)
+
+canvas = tk.Canvas(root, width=800, height=600)
+canvas.pack(side=tk.LEFT)
+
+measurements_textbox = tk.Text(root, width=30, height=35)
+measurements_textbox.pack(side=tk.LEFT, padx=10, pady=10)
+measurements_textbox.insert(tk.END, "")
+
+update_serial_data()
+root.mainloop()
